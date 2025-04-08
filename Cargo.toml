@@ -1,0 +1,28 @@
+[package]
+name = "nixos-upgrade"
+version = "0.1.0"
+edition = "2021"
+description = "A tool to upgrade NixOS during system shutdown"
+authors = ["liberodark"]
+license = "GPL-3.0"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+env_logger = "0.10"
+anyhow = "1.0"
+thiserror = "1.0"
+tokio = { version = "1.32", features = ["full"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3
+
+[lints.rust]
+unsafe_code = "deny"
+unused_imports = "deny"
