@@ -3,8 +3,10 @@ use clap::Parser;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -29,6 +31,12 @@ enum NixosUpgradeError {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct RebootWindow {
+    lower: String,
+    upper: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct NixosUpgradeConfig {
     #[serde(default)]
     operation: String,
@@ -41,6 +49,12 @@ struct NixosUpgradeConfig {
 
     #[serde(default)]
     flags: Vec<String>,
+
+    #[serde(default, rename = "allowReboot")]
+    allow_reboot: bool,
+
+    #[serde(default, rename = "rebootWindow")]
+    reboot_window: Option<RebootWindow>,
 }
 
 impl Default for NixosUpgradeConfig {
@@ -50,6 +64,8 @@ impl Default for NixosUpgradeConfig {
             flake: None,
             channel: None,
             flags: vec!["--no-build-output".to_string()],
+            allow_reboot: false,
+            reboot_window: None,
         }
     }
 }
@@ -65,12 +81,54 @@ struct Cli {
 }
 
 fn check_network_available() -> Result<bool, NixosUpgradeError> {
-    let output = Command::new("ip")
-        .args(["route", "show", "default"])
-        .output()
-        .map_err(NixosUpgradeError::NetworkCheck)?;
+    let dns_servers = ["8.8.8.8:53", "1.1.1.1:53"];
 
-    Ok(!output.stdout.is_empty())
+    let mut last_error = None;
+
+    for server in dns_servers {
+        match server.parse::<SocketAddr>() {
+            Ok(addr) => match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+                Ok(_) => {
+                    info!("Network connectivity confirmed via {}", server);
+                    return Ok(true);
+                }
+                Err(e) => {
+                    debug!("Failed to connect to {}: {}", server, e);
+                    last_error = Some(e);
+                }
+            },
+            Err(e) => debug!("Failed to parse address {}: {}", server, e),
+        }
+    }
+
+    warn!("No network connectivity detected");
+
+    if let Some(err) = last_error {
+        return Err(NixosUpgradeError::NetworkCheck(err));
+    }
+
+    Ok(false)
+}
+
+fn is_within_reboot_window(window: &RebootWindow) -> Result<bool> {
+    let output = Command::new("date")
+        .args(["+%H:%M"])
+        .output()
+        .context("Failed to get current time")?;
+
+    let current_time = String::from_utf8(output.stdout)
+        .context("Failed to parse current time")?
+        .trim()
+        .to_string();
+
+    let lower = &window.lower;
+    let upper = &window.upper;
+
+    if lower < upper {
+        Ok(current_time > *lower && current_time < *upper)
+    } else {
+        Ok(current_time < *upper || current_time > *lower)
+    }
 }
 
 fn run_nixos_upgrade(config: &NixosUpgradeConfig) -> Result<(), NixosUpgradeError> {
@@ -100,6 +158,53 @@ fn run_nixos_upgrade(config: &NixosUpgradeConfig) -> Result<(), NixosUpgradeErro
 
     if !status.success() {
         return Err(NixosUpgradeError::NixosRebuildFailed(status));
+    }
+
+    if config.allow_reboot && config.operation == "boot" {
+        check_and_reboot_if_needed(config)?;
+    }
+
+    Ok(())
+}
+
+fn check_and_reboot_if_needed(config: &NixosUpgradeConfig) -> Result<(), NixosUpgradeError> {
+    let booted = Command::new("readlink")
+        .args([
+            "-f",
+            "/run/booted-system/kernel",
+            "/run/booted-system/initrd",
+            "/run/booted-system/kernel-modules",
+        ])
+        .output()
+        .map_err(NixosUpgradeError::NixosRebuild)?;
+
+    let built = Command::new("readlink")
+        .args([
+            "-f",
+            "/nix/var/nix/profiles/system/kernel",
+            "/nix/var/nix/profiles/system/initrd",
+            "/nix/var/nix/profiles/system/kernel-modules",
+        ])
+        .output()
+        .map_err(NixosUpgradeError::NixosRebuild)?;
+
+    if booted.stdout != built.stdout {
+        if let Some(window) = &config.reboot_window {
+            if let Ok(can_reboot) = is_within_reboot_window(window) {
+                if !can_reboot {
+                    info!("Outside of configured reboot window, skipping reboot.");
+                    return Ok(());
+                }
+            } else {
+                warn!("Failed to check reboot window, proceeding with reboot.");
+            }
+        }
+
+        info!("Initiating reboot since kernel, initrd or modules have changed");
+        Command::new("shutdown")
+            .args(["-r", "+1", "NixOS upgrade requires reboot"])
+            .status()
+            .map_err(NixosUpgradeError::NixosRebuild)?;
     }
 
     Ok(())

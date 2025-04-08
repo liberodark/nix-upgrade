@@ -7,6 +7,18 @@
 let
   cfg = config.system.autoUpgrade;
 
+  configFile = pkgs.writeTextFile {
+    name = "nix-upgrade.json";
+    text = builtins.toJSON {
+      operation = cfg.operation;
+      flake = cfg.flake;
+      channel = cfg.channel;
+      flags = cfg.flags;
+      allowReboot = cfg.allowReboot;
+      rebootWindow = cfg.rebootWindow;
+    };
+  };
+
 in
 {
 
@@ -22,6 +34,15 @@ in
           version. If enabled, a systemd timer will run
           `nixos-rebuild switch --upgrade` once a
           day.
+        '';
+      };
+
+      onShutdown = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Whether to upgrade NixOS when the system is shutting down.
+          If enabled, a systemd service will run during the shutdown process.
         '';
       };
 
@@ -178,7 +199,7 @@ in
 
   };
 
-  config = lib.mkIf cfg.enable {
+  config = lib.mkIf (cfg.enable || cfg.onShutdown) {
 
     assertions = [
       {
@@ -203,7 +224,7 @@ in
         ]
     );
 
-    systemd.services.nixos-upgrade = {
+    systemd.services.nixos-upgrade = lib.mkIf cfg.enable {
       description = "NixOS Upgrade";
 
       restartIfChanged = false;
@@ -289,12 +310,61 @@ in
       wants = [ "network-online.target" ];
     };
 
-    systemd.timers.nixos-upgrade = {
+    systemd.timers.nixos-upgrade = lib.mkIf cfg.enable {
       timerConfig = {
         RandomizedDelaySec = cfg.randomizedDelaySec;
         FixedRandomDelay = cfg.fixedRandomDelay;
         Persistent = cfg.persistent;
       };
+    };
+
+    systemd.services.nix-upgrade-shutdown = lib.mkIf cfg.onShutdown {
+      description = "NixOS Upgrade on Shutdown";
+
+      unitConfig = {
+        DefaultDependencies = false;
+      };
+
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${pkgs.nix-upgrade}/bin/nix-upgrade --config /etc/nix-upgrade.json";
+        TimeoutStartSec = "0";
+      };
+
+      environment =
+        config.nix.envVars
+        // {
+          inherit (config.environment.sessionVariables) NIX_PATH;
+          HOME = "/root";
+        }
+        // config.networking.proxy.envVars;
+
+      path = with pkgs; [
+        coreutils
+        gnutar
+        xz.bin
+        gzip
+        gitMinimal
+        config.system.build.nixos-rebuild
+        config.nix.package.out
+        config.programs.ssh.package
+      ];
+
+      wantedBy = [
+        "shutdown.target"
+        "reboot.target"
+        "halt.target"
+      ];
+      after = [ "network.target" ];
+      before = [
+        "shutdown.target"
+        "reboot.target"
+        "halt.target"
+      ];
+    };
+
+    environment.etc."nix-upgrade.json" = lib.mkIf cfg.onShutdown {
+      source = configFile;
     };
   };
 

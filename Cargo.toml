@@ -1,6 +1,6 @@
 [package]
-name = "nixos-upgrade"
-version = "0.1.0"
+name = "nix-upgrade"
+version = "0.1.1"
 edition = "2021"
 description = "A tool to upgrade NixOS during system shutdown"
 authors = ["liberodark"]

@@ -1,67 +1,113 @@
 # nix-upgrade
 
-An elegant solution for updating NixOS systems during shutdown.
+A reliable tool for NixOS system upgrades during shutdown or reboot.
 
 ## Description
 
-`nix-upgrade` is a tool that automatically updates your NixOS system during shutdown or reboot. Unlike the standard `system.autoUpgrade` module which performs periodic updates via a systemd timer, `nix-upgrade` works when the system shuts down, ensuring your server will boot with the latest version on its next start.
+`nix-upgrade` enhances NixOS's auto-upgrade functionality by adding the ability to perform upgrades during system shutdown or reboot. While the standard module performs upgrades on a timer, this enhancement ensures your system will boot with the latest version on its next start, which is particularly valuable for servers and critical systems.
 
 ## Features
 
-- 🔄 Automatic updates during system shutdown or reboot
-- 🔒 Network availability check before updating
+- 🔄 Upgrade NixOS during shutdown or reboot
+- 🔒 Network availability check before upgrading
 - 🌟 Support for both Nix flakes and traditional channels
-- ⚙️ Flexible configuration via JSON
-- 📝 Detailed logging of update operations
-- 🔧 Compatible with NixOS via a dedicated module
-
-## Installation
-
-TODO
-
-## Usage
-
-Once configured in your NixOS system, `nix-upgrade` works automatically during system shutdown or reboot. No manual intervention is needed.
-
-To temporarily disable shutdown updates:
-
-```nix
-system.shutdownUpgrade.enable = false;
-```
-
-## Configuration
-
-The NixOS module offers the following configuration options:
-
-| Option | Type | Default | Description |
-|--------|------|--------|-------------|
-| `enable` | boolean | `false` | Enables shutdown upgrade |
-| `operation` | enum (`"switch"` or `"boot"`) | `"boot"` | Type of operation for nixos-rebuild |
-| `flake` | string or null | `null` | Nix flake URI to use for the upgrade |
-| `channel` | string or null | `null` | NixOS channel to use (if not using flake) |
-| `flags` | [string] | `["--no-build-output"]` | Additional options for nixos-rebuild |
-
-### Configuration Example
-
-```nix
-system.shutdownUpgrade = {
-  enable = true;
-  operation = "boot";
-  flags = [
-    "--update-input" "nixpkgs"
-    "--commit-lock-file"
-  ];
-};
-```
+- ⚙️ Seamless integration with the standard auto-upgrade module
+- 📝 Detailed logging of upgrade operations
+- 🛡️ Support for controlled reboots with reboot windows
 
 ## How It Works
 
-The tool operates through a systemd service configured to run before shutdown targets (`shutdown.target`, `reboot.target`, `halt.target`). During shutdown, the Rust application:
+The tool consists of two parts:
+1. A Rust application that performs the actual upgrade, handling network checks and config parsing
+2. An extension to the standard `auto-upgrade.nix` module that adds the new `onShutdown` option
 
-1. Checks network availability
-2. Loads configuration
-3. Executes `nixos-rebuild` with appropriate options
-4. Logs results to the system journal
+## Installation
+
+### Step 1: Install the nix-upgrade package
+
+Add the package to your configuration:
+
+```nix
+nixpkgs.overlays = [
+  (self: super: {
+    nix-upgrade = self.callPackage /path/to/nix-upgrade-package.nix {};
+  })
+];
+```
+
+### Step 2: Replace or extend the auto-upgrade module
+
+Either replace the standard module:
+
+```nix
+disabledModules = [ "tasks/auto-upgrade.nix" ];
+imports = [ ./path/to/modified-auto-upgrade.nix ];
+```
+
+Or use it as an extension if you're developing outside the main NixOS repository.
+
+## Configuration
+
+The module uses the standard `system.autoUpgrade` namespace with an additional `onShutdown` option:
+
+```nix
+system.autoUpgrade = {
+  # Standard options
+  enable = true;                 # Enable periodic upgrades (standard functionality)
+  dates = "04:40";               # When to run periodic upgrades
+
+  # New option
+  onShutdown = true;             # Enable upgrades during shutdown or reboot
+
+  # Shared options (used by both types of upgrades)
+  operation = "boot";            # Use "boot" for shutdown upgrades (recommended)
+  flake = "github:user/config";  # Flake URI (if using flakes)
+  # channel = "...";             # Or channel (if not using flakes)
+  allowReboot = true;            # Whether to reboot if needed
+
+  # Additional options
+  flags = [                      # Additional flags for nixos-rebuild
+    "--update-input" "nixpkgs"
+    "--commit-lock-file"
+  ];
+  rebootWindow = {               # Time window when reboots are allowed
+    lower = "01:00";
+    upper = "05:00";
+  };
+};
+```
+
+### Upgrade Strategies
+
+You can choose one of the following strategies:
+
+1. **Periodic upgrades only**: Set `enable = true` and `onShutdown = false`
+2. **Shutdown upgrades only**: Set `enable = false` and `onShutdown = true`
+3. **Both types of upgrades**: Set both `enable = true` and `onShutdown = true`
+
+## Operation Modes
+
+For `system.autoUpgrade.operation`, there are two options:
+
+- `switch`: Changes take effect immediately (better for periodic upgrades)
+- `boot`: Changes take effect on next boot (recommended for shutdown upgrades)
+
+## Advanced Configuration
+
+### Reboot Control
+
+If `allowReboot` is set to `true`, the system will reboot automatically if a kernel, initrd, or module change is detected during the upgrade. You can restrict when these reboots occur using the `rebootWindow` option.
+
+```nix
+rebootWindow = {
+  lower = "01:00";  # 1:00 AM
+  upper = "05:00";  # 5:00 AM
+};
+```
+
+### Network Requirements
+
+The shutdown upgrade service checks for network connectivity before proceeding. If the network is not available, the upgrade will be skipped.
 
 ## Development
 
@@ -71,7 +117,7 @@ The tool operates through a systemd service configured to run before shutdown ta
 - Cargo
 - Nix 2.4 or higher
 
-### Building
+### Building the Rust application
 
 ```bash
 cargo build --release
@@ -79,6 +125,8 @@ cargo build --release
 
 ### Testing
 
+For testing the shutdown upgrade without actually shutting down, you can manually run:
+
 ```bash
-cargo test
+sudo nix-upgrade --config /etc/nix-upgrade.json
 ```
